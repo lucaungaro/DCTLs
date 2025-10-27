@@ -1,0 +1,444 @@
+/*
+ * (c) Luca UNGARO
+ * v1.0 - 08/2025
+ *
+ *
+ */
+
+DEFINE_UI_PARAMS(cs_in, Input Color Space, DCTLUI_COMBO_BOX, 0, { bt_1886, bt_2020, p3 }, { BT.1886 (rec.709), BT.2020 (rec.2020), DCDM X'Y'Z' (DCI P3) })
+DEFINE_UI_PARAMS(tf_in, Input Transf. Function, DCTLUI_COMBO_BOX, 1, { gamma_22, gamma_24, gamma_26, gamma_lin }, { Gamma 2.2, Gamma 2.4, Gamma 2.6, Linear })
+DEFINE_UI_PARAMS(cs_out, HDR Output, DCTLUI_COMBO_BOX, 1, { bt_2100_hlg, bt_2100_pq }, { BT.2100 HLG, BT.2100 PQ })
+DEFINE_UI_PARAMS(scene_white, Scene White, DCTLUI_SLIDER_FLOAT, 200.0f, 1.0f, 10000.0f, 0.1f)                           /* Default, min, max, step */
+DEFINE_UI_PARAMS(hlg_lw, HLG Display Peak, DCTLUI_SLIDER_FLOAT, 1000.0f, 1.0f, 10000.0f, 0.1f)                           /* Default, min, max, step */
+
+typedef struct
+{
+    float x_r, x_g, x_b;
+    float y_r, y_g, y_b;
+    float z_r, z_g, z_b;
+}                       m_rgb_to_xyz;
+
+typedef struct
+{
+    float r_x, r_y, r_z;
+    float g_x, g_y, g_z;
+    float b_x, b_y, b_z;
+}                       m_xyz_to_rgb;
+
+typedef m_rgb_to_xyz    t_matrix;
+
+typedef struct
+{
+    float x_r, y_r;
+    float x_g, y_g;
+    float x_b, y_b;
+    float x_w, y_w;
+}                      cie_1931_colorspace;
+
+__CONSTANT__ float                  LINEAR  = 0.0f;
+
+__CONSTANT__ cie_1931_colorspace    SDR_BT_1886 = {
+    0.640f,     0.330f,
+    0.300f,     0.600f,
+    0.150f,     0.060f,
+    0.3127f,    0.3290f /* D65 */
+};
+
+__CONSTANT__ cie_1931_colorspace    SDR_BT_2020 = {
+    0.708f,     0.292f,
+    0.170f,     0.797f,
+    0.131f,     0.046f,
+    0.3127f,    0.3290f /* D65 */
+};
+
+
+__CONSTANT__ cie_1931_colorspace    HDR_BT_2100             = SDR_BT_2020;
+__CONSTANT__ float                  HDR_BT_2100_MAX_NITS    = 10000.0f;
+
+/* ************************************************************************** */
+/* *************************** Generic Math ********************************* */
+/* ************************************************************************** */
+t_matrix _invert_matrix(t_matrix m)
+{
+    t_matrix    inv;
+    float       det;
+    float       invDet;
+
+    // Cofactor matrix
+    inv.x_r =   (m.y_g * m.z_b - m.y_b * m.z_g);
+    inv.x_g = - (m.x_g * m.z_b - m.x_b * m.z_g);
+    inv.x_b =   (m.x_g * m.y_b - m.x_b * m.y_g);
+
+    inv.y_r = - (m.y_r * m.z_b - m.y_b * m.z_r);
+    inv.y_g =   (m.x_r * m.z_b - m.x_b * m.z_r);
+    inv.y_b = - (m.x_r * m.y_b - m.x_b * m.y_r);
+
+    inv.z_r =   (m.y_r * m.z_g - m.y_g * m.z_r);
+    inv.z_g = - (m.x_r * m.z_g - m.x_g * m.z_r);
+    inv.z_b =   (m.x_r * m.y_g - m.x_g * m.y_r);
+
+    // Determinant
+    det = m.x_r * inv.x_r + m.x_g * inv.y_r + m.x_b * inv.z_r;
+    if (det == 0.0f)
+    {
+        // Non-invertible matrix → return identity as fallback
+        t_matrix identity = {
+            1.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f,
+            0.0f, 0.0f, 1.0f
+        };
+        return identity;
+    }
+
+    // Invert determinant
+    invDet = 1.0f / det;
+    // Adjugate is transpose of cofactor → divide by determinant
+    t_matrix result = {
+        inv.x_r * invDet, inv.x_g * invDet, inv.x_b * invDet,
+        inv.y_r * invDet, inv.y_g * invDet, inv.y_b * invDet,
+        inv.z_r * invDet, inv.z_g * invDet, inv.z_b * invDet
+    };
+    return result;
+}
+
+float apply_gamma(float c, float gamma)
+{
+    if (c <= 0.0f) return 0.0f;
+    return _powf(c, 1.0f / gamma);
+}
+
+float invert_gamma(float e, float gamma)
+{
+    if (e <= 0.0f) return 0.0f;
+    e = _fminf(_fmaxf(e, 0.0f), 1.0f);
+    return _powf(e, gamma);
+}
+
+float3 _xyY_to_XYZ(float x, float y, float Y)
+{
+    float   X;
+    float   Z;
+
+    X = 0.0f;
+    Z = 0.0f;
+    if (Y != 0.0f)
+    {
+        X = (x * Y) / y;
+        Z = ((1.0f - x - y) * Y) / y;
+    }
+    return make_float3(X, Y, Z);
+}
+
+/* ************************************************************************** */
+/* *************************** SDR Tranf functions ************************** */
+/* ************************************************************************** */
+float3 XYZ_to_rgb(float3 XYZ, cie_1931_colorspace cs, float gamma)
+{
+    float3      W;
+    float       Xr;
+    float       Yr;
+    float       Zr;
+    float       Xg;
+    float       Yg;
+    float       Zg;
+    float       Xb;
+    float       Yb;
+    float       Zb;
+    t_matrix    M_prim;
+    t_matrix    invM_prim;
+    float       Sr;
+    float       Sg;
+    float       Sb;
+    t_matrix    M;          /* RGB to XYZ */
+    t_matrix    invM;       /* XYZ to RGB */
+
+    float       r;
+    float       g;
+    float       b;
+
+    W = _xyY_to_XYZ(cs.x_w, cs.y_w, 1.0f);
+    Xr = cs.x_r / cs.y_r;
+    Yr = 1.0f;
+    Zr = (1.0f - cs.x_r - cs.y_r) / cs.y_r;
+    Xg = cs.x_g / cs.y_g;
+    Yg = 1.0f;
+    Zg = (1.0f - cs.x_g - cs.y_g) / cs.y_g;
+    Xb = cs.x_b / cs.y_b;
+    Yb = 1.0f;
+    Zb = (1.0f - cs.x_b - cs.y_b) / cs.y_b;
+    M_prim = {
+        Xr, Xg, Xb,
+        Yr, Yg, Yb,
+        Zr, Zg, Zb
+    };
+    invM_prim = _invert_matrix(M_prim);
+    Sr = invM_prim.x_r * W.x + invM_prim.x_g * W.y + invM_prim.x_b * W.z;
+    Sg = invM_prim.y_r * W.x + invM_prim.y_g * W.y + invM_prim.y_b * W.z;
+    Sb = invM_prim.z_r * W.x + invM_prim.z_g * W.y + invM_prim.z_b * W.z;
+    M = {
+        Sr * Xr, Sg * Xg, Sb * Xb,
+        Sr * Yr, Sg * Yg, Sb * Yb,
+        Sr * Zr, Sg * Zg, Sb * Zb
+    };
+    invM = _invert_matrix(M);
+    r = invM.x_r * XYZ.x + invM.x_g * XYZ.y + invM.x_b * XYZ.z;
+    g = invM.y_r * XYZ.x + invM.y_g * XYZ.y + invM.y_b * XYZ.z;
+    b = invM.z_r * XYZ.x + invM.z_g * XYZ.y + invM.z_b * XYZ.z;
+    if (gamma != 0.0f)
+    {
+        r = apply_gamma(r, gamma);
+        g = apply_gamma(g, gamma);
+        b = apply_gamma(b, gamma);
+    }
+    r = _fmaxf(0.0f, _fminf(1.0f, r));
+    g = _fmaxf(0.0f, _fminf(1.0f, g));
+    b = _fmaxf(0.0f, _fminf(1.0f, b));
+    return make_float3(r, g, b);
+}
+
+float3 rgb_to_XYZ(float r, float g, float b, cie_1931_colorspace cs, float gamma)
+{
+    float3      W;
+    float       Xr;
+    float       Yr;
+    float       Zr;
+    float       Xg;
+    float       Yg;
+    float       Zg;
+    float       Xb;
+    float       Yb;
+    float       Zb;
+    t_matrix    M_prim;
+    t_matrix    invM_prim;
+    float       Sr;
+    float       Sg;
+    float       Sb;
+    t_matrix    M;          /* RGB to XYZ */
+
+    float       X;
+    float       Y;
+    float       Z;
+
+    if (gamma != 0.0f)
+    {
+        r = invert_gamma(r, gamma);
+        g = invert_gamma(g, gamma);
+        b = invert_gamma(b, gamma);
+    }
+    W = _xyY_to_XYZ(cs.x_w, cs.y_w, 1.0f);
+    Xr = cs.x_r / cs.y_r;
+    Yr = 1.0f;
+    Zr = (1.0f - cs.x_r - cs.y_r) / cs.y_r;
+    Xg = cs.x_g / cs.y_g;
+    Yg = 1.0f;
+    Zg = (1.0f - cs.x_g - cs.y_g) / cs.y_g;
+    Xb = cs.x_b / cs.y_b;
+    Yb = 1.0f;
+    Zb = (1.0f - cs.x_b - cs.y_b) / cs.y_b;
+    M_prim = {
+        Xr, Xg, Xb,
+        Yr, Yg, Yb,
+        Zr, Zg, Zb
+    };
+    invM_prim = _invert_matrix(M_prim);
+    Sr = invM_prim.x_r * W.x + invM_prim.x_g * W.y + invM_prim.x_b * W.z;
+    Sg = invM_prim.y_r * W.x + invM_prim.y_g * W.y + invM_prim.y_b * W.z;
+    Sb = invM_prim.z_r * W.x + invM_prim.z_g * W.y + invM_prim.z_b * W.z;
+    M = {
+        Sr * Xr, Sg * Xg, Sb * Xb,
+        Sr * Yr, Sg * Yg, Sb * Yb,
+        Sr * Zr, Sg * Zg, Sb * Zb
+    };
+    X = M.x_r * r + M.x_g * g + M.x_b * b;
+    Y = M.y_r * r + M.y_g * g + M.y_b * b;
+    Z = M.z_r * r + M.z_g * g + M.z_b * b;
+    return make_float3(X, Y, Z);
+}
+
+float3 XYZ_to_LMS(float3 XYZ)
+{
+    t_matrix    Mat;
+    float       L;
+    float       M;
+    float       S;
+
+    Mat = {
+        0.4002f,    0.7076f,    -0.0808f,
+        -0.2263f,   1.1653f,    0.0457f,
+        0.0f,       0.0f,       0.9182f
+    };
+    L = Mat.x_r * XYZ.x + Mat.x_g * XYZ.y + Mat.x_b * XYZ.z;
+    M = Mat.y_r * XYZ.x + Mat.y_g * XYZ.y + Mat.y_b * XYZ.z;
+    S = Mat.z_r * XYZ.x + Mat.z_g * XYZ.y + Mat.z_b * XYZ.z;
+    return make_float3(L, M, S);
+}
+
+float3 rgb_to_lum(float3 RGB, float gamma, float max)
+{
+    float   a;
+    float   b;
+    float3  lum;
+
+    // a = _powf(_powf(max, _frecip(gamma)) - _powf(0.0f, _frecip(gamma)), gamma);
+    // b = _powf(0.0f, _frecip(gamma)) / (_powf(max, _frecip(gamma)) - _powf(0.0f, _frecip(gamma)));
+    a = max;        /* Simplified version of the above :) */
+    b = 0.0f;       /* Simplified version of the above :) */
+    lum.x = a * _powf(_fmaxf(RGB.x + b, 0.0f), gamma);
+    lum.y = a * _powf(_fmaxf(RGB.y + b, 0.0f), gamma);
+    lum.z = a * _powf(_fmaxf(RGB.z + b, 0.0f), gamma);
+    return lum;
+}
+
+
+/* ************************************************************************** */
+/* *************************** PQ Transf functions ************************** */
+/* ************************************************************************** */
+float3 pq_oetf(float3 RGB, float max)
+{
+    float   m1;
+    float   m2;
+    float   c1;
+    float   c2;
+    float   c3;
+    float3  Y;
+    float3  pq;
+
+    m1 = (2610.0f / 16384.0f);
+    m2 = (2523.0f / 4096.0f) * 128.0f;
+    c1 = (3424.0f / 4096.0f);
+    c2 = (2413.0f / 4096.0f) * 32.0f;
+    c3 = (2392.0f / 4096.0f) * 32.0f;
+    Y.x = RGB.x / HDR_BT_2100_MAX_NITS;
+    Y.y = RGB.y / HDR_BT_2100_MAX_NITS;
+    Y.z = RGB.z / HDR_BT_2100_MAX_NITS;
+    pq.x = _powf((c1 + (c2 * _powf(Y.x, m1))) / (1 + (c3 * _powf(Y.x, m1))), m2);
+    pq.y = _powf((c1 + (c2 * _powf(Y.y, m1))) / (1 + (c3 * _powf(Y.y, m1))), m2);
+    pq.z = _powf((c1 + (c2 * _powf(Y.z, m1))) / (1 + (c3 * _powf(Y.z, m1))), m2);
+    return pq;
+}
+
+
+/* ************************************************************************** */
+/* ************************** HLG Transf functions ************************** */
+/* ************************************************************************** */
+float _hlg_encode(float E)
+{
+    float   a;
+    float   b;
+    float   c;
+    float   Eprim;
+
+    E = _fmaxf(E, 0.0f);
+    if (E <= 1.0f / 12.0f)
+    {
+        Eprim = _sqrtf(3 * E);
+    }
+    else
+    {
+        a = 0.17883277f;
+        b = 1.0f - (4.0f * a);
+        c = 0.5f - (a * _logf(4.0f * a));
+        Eprim = a * _logf((12.0f * E) - b) + c;
+    }
+    return Eprim;
+}
+
+float _hlg_system_gamma(float Lw)
+{
+    float   gamma;
+
+    if (Lw <= 0.0f)
+    {
+        gamma = 1.2f;
+    }
+    else
+    {
+        gamma = 1.2f + 0.42f * _log10f(Lw / 1000.0f);
+    }
+    return gamma;
+}
+
+float3 _hlg_ootf(float3 RGB_scene, float Lw)
+{
+    float   gamma;
+    float   Ys;
+    float   factor;
+    float3  RD;
+
+    gamma = _hlg_system_gamma(Lw);
+    Ys = 0.2627f * RGB_scene.x + 0.6780f * RGB_scene.y + 0.0593f * RGB_scene.z;
+    factor = _powf(_fmaxf(Ys, 1e-8f), gamma - 1.0f) * Lw;
+    RD.x = factor * _powf(RGB_scene.x, gamma);
+    RD.y = factor * _powf(RGB_scene.y, gamma);
+    RD.z = factor * _powf(RGB_scene.z, gamma);
+    return RD; // in cd/m^2
+}
+
+float3 hlg_oetf(float3 RGB, float max, float Lw)
+{
+    float3  hlg;
+
+    RGB.x = RGB.x / Lw;
+    RGB.y = RGB.y / Lw;
+    RGB.z = RGB.z / Lw;
+    hlg.x = _hlg_encode(RGB.x);
+    hlg.y = _hlg_encode(RGB.y);
+    hlg.z = _hlg_encode(RGB.z);
+    return hlg;
+}
+
+
+/* ************************************************************************** */
+/* ****************************** MAIN ************************************** */
+/* ************************************************************************** */
+__DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, float p_R, float p_G, float p_B)
+{
+    float   gamma;
+    float3  linear_XYZ;
+    float3  RGB_normalized;
+    float3  luminance_values;
+    float3  RGB_out;
+
+    switch (tf_in)
+    {
+        case gamma_22:
+            gamma = 2.2f;
+            break;
+        case gamma_24:
+            gamma = 2.4f;
+            break;
+        case gamma_26:
+            gamma = 2.6f;
+            break;
+        case gamma_lin:
+            gamma = 1.0f;
+            break;
+    }
+    switch (cs_in)
+    {
+        case bt_1886:
+            linear_XYZ = rgb_to_XYZ(p_R, p_G, p_B, SDR_BT_1886, gamma);
+            break;
+        case bt_2020:
+            linear_XYZ = rgb_to_XYZ(p_R, p_G, p_B, SDR_BT_2020, gamma);
+            break;
+        case p3:
+            // linear_XYZ = rgb_to_XYZ(p_R, p_G, p_B, SDR_BT_2020, gamma);
+            linear_XYZ.x = invert_gamma(p_R, gamma);
+            linear_XYZ.y = invert_gamma(p_G, gamma);
+            linear_XYZ.z = invert_gamma(p_B, gamma);
+            break;
+    }
+    RGB_normalized = XYZ_to_rgb(linear_XYZ, HDR_BT_2100, gamma);
+    luminance_values = rgb_to_lum(RGB_normalized, gamma, scene_white);
+    switch (cs_out)
+    {
+        case  bt_2100_pq:
+            RGB_out = pq_oetf(luminance_values, scene_white);
+            break;
+        case bt_2100_hlg:
+            RGB_out = hlg_oetf(luminance_values, scene_white, hlg_lw);
+            break;
+    }
+    return RGB_out;
+}

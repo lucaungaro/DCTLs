@@ -1,0 +1,99 @@
+
+DEFINE_UI_PARAMS(r_R, 🔴 Red-R, DCTLUI_SLIDER_FLOAT, 0.0, -2.0, 2.0, 0.001)
+DEFINE_UI_PARAMS(r_G, 🔴 Red-G, DCTLUI_SLIDER_FLOAT, 0.0, -2.0, 2.0, 0.001)
+DEFINE_UI_PARAMS(r_B, 🔴 Red-B, DCTLUI_SLIDER_FLOAT, 0.0, -2.0, 2.0, 0.001)
+
+DEFINE_UI_PARAMS(g_R, 🟢 Green-R, DCTLUI_SLIDER_FLOAT,  0.0, -2.0, 2.0, 0.001)
+DEFINE_UI_PARAMS(g_G, 🟢 Green-G, DCTLUI_SLIDER_FLOAT,  0.0, -2.0, 2.0, 0.001)
+DEFINE_UI_PARAMS(g_B, 🟢 Green-B, DCTLUI_SLIDER_FLOAT,  0.0, -2.0, 2.0, 0.001)
+
+DEFINE_UI_PARAMS(b_R, 🔵 Blue-R, DCTLUI_SLIDER_FLOAT,  0.0, -2.0, 2.0, 0.001)
+DEFINE_UI_PARAMS(b_G, 🔵 Blue-G, DCTLUI_SLIDER_FLOAT,  0.0, -2.0, 2.0, 0.001)
+DEFINE_UI_PARAMS(b_B, 🔵 Blue-B, DCTLUI_SLIDER_FLOAT,  0.0, -2.0, 2.0, 0.001)
+
+DEFINE_UI_PARAMS(w_R, ⬛️ White-R, DCTLUI_SLIDER_FLOAT,  0.0, -1.0, 1.0, 0.001)
+DEFINE_UI_PARAMS(w_G, ⬛️ White-G, DCTLUI_SLIDER_FLOAT,  0.0, -1.0, 1.0, 0.001)
+DEFINE_UI_PARAMS(w_B, ⬛️ White-B, DCTLUI_SLIDER_FLOAT,  0.0, -1.0, 1.0, 0.001)
+
+DEFINE_UI_PARAMS(k_R, ⬜️ Black-R, DCTLUI_SLIDER_FLOAT,  0.0, -1.0, 1.0, 0.001)
+DEFINE_UI_PARAMS(k_G, ⬜️ Black-G, DCTLUI_SLIDER_FLOAT,  0.0, -1.0, 1.0, 0.001)
+DEFINE_UI_PARAMS(k_B, ⬜️ Black-B, DCTLUI_SLIDER_FLOAT,  0.0, -1.0, 1.0, 0.001)
+
+DEFINE_UI_PARAMS(c_R, 🟦 Cyan-R, DCTLUI_SLIDER_FLOAT,  0.0, -2.0, 2.0, 0.001)
+DEFINE_UI_PARAMS(c_G, 🟦 Cyan-G, DCTLUI_SLIDER_FLOAT,  0.0, -2.0, 2.0, 0.001)
+DEFINE_UI_PARAMS(c_B, 🟦 Cyan-B, DCTLUI_SLIDER_FLOAT,  0.0, -2.0, 2.0, 0.001)
+
+DEFINE_UI_PARAMS(m_R, 🟪 Magenta-R, DCTLUI_SLIDER_FLOAT,  0.0, -2.0, 2.0, 0.001)
+DEFINE_UI_PARAMS(m_G, 🟪 Magenta-G, DCTLUI_SLIDER_FLOAT,  0.0, -2.0, 2.0, 0.001)
+DEFINE_UI_PARAMS(m_B, 🟪 Magenta-B, DCTLUI_SLIDER_FLOAT,  0.0, -2.0, 2.0, 0.001)
+
+DEFINE_UI_PARAMS(y_R, 🟨 Yellow-R, DCTLUI_SLIDER_FLOAT,  0.0, -2.0, 2.0, 0.001)
+DEFINE_UI_PARAMS(y_G, 🟨 Yellow-G, DCTLUI_SLIDER_FLOAT,  0.0, -2.0, 2.0, 0.001)
+DEFINE_UI_PARAMS(y_B, 🟨 Yellow-B, DCTLUI_SLIDER_FLOAT,  0.0, -2.0, 2.0, 0.001)
+
+__DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, float p_R, float p_G, float p_B)
+{
+    float3 ret;
+    float3 in  = make_float3(p_R,           p_G,            p_B);
+    float3 red = make_float3(r_R + 1.0f,    r_G,            r_B);
+    float3 grn = make_float3(g_R,           g_G + 1.0f,     g_B);
+    float3 blu = make_float3(b_R,           b_G,            b_B + 1.0f);
+    float3 cyn = make_float3(c_R,           c_G + 1.0f,     c_B + 1.0f);
+    float3 mag = make_float3(m_R + 1.0f,    m_G,            m_B + 1.0f);
+    float3 yel = make_float3(y_R + 1.0f,    y_G + 1.0f,     y_B);
+    float3 wht = make_float3(w_R + 1.0f,    w_G + 1.0f,     w_B + 1.0f);
+    float3 blk = make_float3(k_R,           k_G,            k_B);
+    // float3 ngr = make_float3(0.5f,          0.5f,           0.5f);
+    // float3 mgr = make_float3(mg_R,          mg_G,           mg_B)       + ngr;
+    // float  gr_dist;
+    // float  gr_weight;
+
+    if (p_R>p_G)
+    {
+        if (p_G>p_B)                                            /* R > G > B */
+        {
+            ret = p_R * (red-blk) + blk
+                + p_G * (yel-red)
+                + p_B * (wht-yel);
+        }
+        else if (p_R>p_B)                                       /* R > B > G */
+        {
+            ret = p_R * (red-blk) + blk
+                + p_G * (wht-mag)
+                + p_B * (mag-red);
+        }
+        else                                                    /* B > R > G */
+        {
+            ret = p_R * (mag-blu)
+                + p_G * (wht-mag)
+                + p_B * (blu-blk) + blk;
+        }
+    }
+    else
+    {
+        if (p_B>p_G)                                            /* B > G > R */
+        {
+            ret = p_R * (wht-cyn)
+                + p_G * (cyn-blu)
+                + p_B * (blu-blk) + blk;
+        }
+        else if (p_B>p_R)                                       /* G > B > R */
+        {
+            ret = p_R * (wht-cyn)
+                + p_G * (grn-blk) + blk
+                + p_B * (cyn-grn);
+        }
+        else                                                    /* G > R > B */
+        {
+            ret = p_R * (yel-grn)
+                + p_G * (grn-blk) + blk
+                + p_B * (wht-yel);
+        }
+    }
+    // gr_dist = length(ret - ngr);
+    // gr_weight = _expf(-20.0f * gr_dist * gr_dist);
+    // // gr_weight=0;
+    // return make_float3(gr_weight, gr_weight, gr_weight);
+    // ret = mix(ret, mgr, gr_weight);
+    return ret;
+}
